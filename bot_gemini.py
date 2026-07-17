@@ -1,15 +1,3 @@
-"""
-Групповой ИИ-бот на базе Google Gemini (БЕСПЛАТНО).
-
-Установка:
-    pip3 install python-telegram-bot==21.4 google-generativeai apscheduler
-
-Запуск:
-    export TELEGRAM_TOKEN="токен от BotFather"
-    export GEMINI_API_KEY="ключ с aistudio.google.com"
-    python3 bot_gemini.py
-"""
-
 import os
 import re
 import json
@@ -19,16 +7,16 @@ from pathlib import Path
 from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, ContextTypes, filters
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 
 DATA_FILE = Path(__file__).parent / "memory.json"
 
-genai.configure(api_key=GEMINI_API_KEY)
+client = genai.Client(api_key=GEMINI_API_KEY)
 
-# --- характер бота, меняй под себя ---
 SYSTEM_PROMPT = """Ты — саркастичный, дерзкий ИИ-агент в групповом чате пары.
 Ты подкалываешь, замечаешь двойные стандарты, шутишь, но по делу.
 Отвечай коротко, живо, на русском, без занудства. Материшься если в тему.
@@ -36,10 +24,6 @@ SYSTEM_PROMPT = """Ты — саркастичный, дерзкий ИИ-аге
 У тебя есть специальные команды — вставляй их в конец ответа когда нужно:
 - Запомнить факт: [ЗАПОМНИ: текст факта]
 - Поставить напоминание: [НАПОМНИ: 2026-07-18T19:00:00 | текст напоминания]
-
-Примеры:
-  Пользователь говорит что у него день рождения 5 августа → добавь [ЗАПОМНИ: день рождения Егора — 5 августа]
-  Просят напомнить купить хлеб в 18:00 → добавь [НАПОМНИ: 2026-07-17T18:00:00 | купить хлеб]
 
 Если в сообщении нет вопроса или задачи для тебя — не отвечай, просто напиши пустую строку."""
 
@@ -79,40 +63,38 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data, chat = get_chat(chat_id)
 
     facts = "\n".join(f"- {f}" for f in chat["facts"][-50:]) or "(пока пусто)"
-    system = f"{SYSTEM_PROMPT}\n\nЗапомненные факты об участниках:\n{facts}\nТекущее время: {datetime.now().strftime('%Y-%m-%dT%H:%M:%S')}"
+    system = f"{SYSTEM_PROMPT}\n\nЗапомненные факты:\n{facts}\nТекущее время: {datetime.now().strftime('%Y-%m-%dT%H:%M:%S')}"
 
-    model = genai.GenerativeModel("gemini-2.0-flash", system_instruction=system)
+    contents = []
+    for msg in chat["history"][-20:]:
+        role = "user" if msg["role"] == "user" else "model"
+        contents.append(types.Content(role=role, parts=[types.Part(text=msg["content"])]))
+    contents.append(types.Content(role="user", parts=[types.Part(text=f"{user}: {text}")]))
 
-    # История последних 20 сообщений
-    history = [{"role": m["role"], "parts": [m["content"]]} for m in chat["history"][-20:]]
-    session = model.start_chat(history=history)
+    response = client.models.generate_content(
+        model="gemini-2.0-flash",
+        contents=contents,
+        config=types.GenerateContentConfig(system_instruction=system),
+    )
 
-    response = session.send_message(f"{user}: {text}")
-    reply = response.text.strip()
+    reply = response.text.strip() if response.text else ""
 
-    # Сохраняем в историю
     chat["history"].append({"role": "user", "content": f"{user}: {text}"})
     chat["history"].append({"role": "model", "content": reply})
 
-    # Парсим [ЗАПОМНИ: ...]
     for fact in re.findall(r'\[ЗАПОМНИ:\s*(.+?)\]', reply):
         chat["facts"].append(fact.strip())
 
-    # Парсим [НАПОМНИ: дата | текст]
     for when_iso, remind_text in re.findall(r'\[НАПОМНИ:\s*(.+?)\s*\|\s*(.+?)\]', reply):
         try:
             run_date = datetime.fromisoformat(when_iso.strip())
-            scheduler.add_job(
-                send_reminder, "date", run_date=run_date,
-                args=[chat_id, remind_text.strip()],
-                misfire_grace_time=3600
-            )
+            scheduler.add_job(send_reminder, "date", run_date=run_date,
+                              args=[chat_id, remind_text.strip()], misfire_grace_time=3600)
         except Exception:
             pass
 
     save_data(data)
 
-    # Убираем служебные теги из ответа перед отправкой
     clean = re.sub(r'\[ЗАПОМНИ:.*?\]', '', reply)
     clean = re.sub(r'\[НАПОМНИ:.*?\]', '', clean).strip()
 
@@ -121,15 +103,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("На связи. Пишите — запоминаю, напоминаю, подкалываю.")
+    await update.message.reply_text("На связи.")
+
+
+async def post_init(application):
+    scheduler.start()
 
 
 def main():
     global tg_app
-    tg_app = Application.builder().token(TELEGRAM_TOKEN).build()
+    tg_app = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
     tg_app.add_handler(CommandHandler("start", start_cmd))
     tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    scheduler.start()
     tg_app.run_polling()
 
 
