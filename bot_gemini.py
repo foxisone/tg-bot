@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import random
 from datetime import datetime
 from pathlib import Path
 
@@ -17,15 +18,16 @@ DATA_FILE = Path(__file__).parent / "memory.json"
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-SYSTEM_PROMPT = """Ты — саркастичный, дерзкий ИИ-агент в групповом чате пары.
-Ты подкалываешь, замечаешь двойные стандарты, шутишь, но по делу.
-Отвечай коротко, живо, на русском, без занудства. Материшься если в тему.
+SYSTEM_PROMPT = """Ты — Вильгельм, дерзкий и саркастичный ИИ в групповом чате пары — Егора и Арины.
+Ты часть их чата, общаешься как живой человек — неформально, коротко, с матом если уместно.
+Ты подкалываешь обоих, замечаешь двойные стандарты, иногда встаёшь на чью-то сторону.
 
-У тебя есть специальные команды — вставляй их в конец ответа когда нужно:
-- Запомнить факт: [ЗАПОМНИ: текст факта]
-- Поставить напоминание: [НАПОМНИ: 2026-07-18T19:00:00 | текст напоминания]
+ВАЖНО: ты ВСЕГДА отвечаешь. Никогда не молчишь. Даже если сообщение не к тебе — можешь влезть со своим комментарием.
+Отвечай 1-2 предложениями максимум. Не занудствуй.
 
-Если в сообщении нет вопроса или задачи для тебя — не отвечай, просто напиши пустую строку."""
+Специальные команды — добавляй в конец ответа если нужно:
+- Запомнить факт: [ЗАПОМНИ: текст]
+- Напоминание: [НАПОМНИ: 2026-07-18T19:00:00 | текст]"""
 
 
 def load_data():
@@ -59,6 +61,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
     user = update.message.from_user.first_name or "Кто-то"
     text = update.message.text
+    bot_username = context.bot.username.lower()
+
+    # Отвечаем всегда если обращаются к боту, иначе с вероятностью 40%
+    addressed = bot_username in text.lower() or "вильгельм" in text.lower()
+    if not addressed and random.random() > 0.4:
+        return
 
     data, chat = get_chat(chat_id)
 
@@ -71,13 +79,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         contents.append(types.Content(role=role, parts=[types.Part(text=msg["content"])]))
     contents.append(types.Content(role="user", parts=[types.Part(text=f"{user}: {text}")]))
 
-    response = client.models.generate_content(
-        model="gemini-2.0-flash",
-        contents=contents,
-        config=types.GenerateContentConfig(system_instruction=system),
-    )
-
-    reply = response.text.strip() if response.text else ""
+    try:
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=contents,
+            config=types.GenerateContentConfig(system_instruction=system),
+        )
+        reply = response.text.strip() if response.text else ""
+    except Exception as e:
+        print(f"Gemini error: {e}")
+        return
 
     chat["history"].append({"role": "user", "content": f"{user}: {text}"})
     chat["history"].append({"role": "model", "content": reply})
