@@ -8,26 +8,21 @@ from pathlib import Path
 from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, ContextTypes, filters
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from google import genai
-from google.genai import types
+import anthropic
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
-GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
+ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 
 DATA_FILE = Path(__file__).parent / "memory.json"
+client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-client = genai.Client(api_key=GEMINI_API_KEY)
+SYSTEM_PROMPT = """Ты — Вильгельм, дерзкий ИИ в групповом чате пары — Егора и Арины.
+Общаешься как живой человек: неформально, коротко, с матом если уместно.
+Подкалываешь обоих, замечаешь двойные стандарты, иногда встаёшь на чью-то сторону.
+Отвечай 1-2 предложениями. Не занудствуй. Всегда отвечай — никогда не молчишь.
 
-SYSTEM_PROMPT = """Ты — Вильгельм, дерзкий и саркастичный ИИ в групповом чате пары — Егора и Арины.
-Ты часть их чата, общаешься как живой человек — неформально, коротко, с матом если уместно.
-Ты подкалываешь обоих, замечаешь двойные стандарты, иногда встаёшь на чью-то сторону.
-
-ВАЖНО: ты ВСЕГДА отвечаешь. Никогда не молчишь. Даже если сообщение не к тебе — можешь влезть со своим комментарием.
-Отвечай 1-2 предложениями максимум. Не занудствуй.
-
-Специальные команды — добавляй в конец ответа если нужно:
-- Запомнить факт: [ЗАПОМНИ: текст]
-- Напоминание: [НАПОМНИ: 2026-07-18T19:00:00 | текст]"""
+Если хочешь запомнить факт — добавь в конец: [ЗАПОМНИ: текст]
+Если хочешь поставить напоминание — добавь: [НАПОМНИ: 2026-07-18T19:00:00 | текст]"""
 
 
 def load_data():
@@ -51,7 +46,7 @@ tg_app = None
 
 
 async def send_reminder(chat_id, text):
-    await tg_app.bot.send_message(chat_id=chat_id, text=f"⏰ Напоминание: {text}")
+    await tg_app.bot.send_message(chat_id=chat_id, text=f"⏰ {text}")
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -61,37 +56,35 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
     user = update.message.from_user.first_name or "Кто-то"
     text = update.message.text
-    bot_username = context.bot.username.lower()
+    bot_username = (context.bot.username or "").lower()
 
-    # Отвечаем всегда если обращаются к боту, иначе с вероятностью 40%
     addressed = bot_username in text.lower() or "вильгельм" in text.lower()
     if not addressed and random.random() > 0.4:
         return
 
     data, chat = get_chat(chat_id)
-
     facts = "\n".join(f"- {f}" for f in chat["facts"][-50:]) or "(пока пусто)"
     system = f"{SYSTEM_PROMPT}\n\nЗапомненные факты:\n{facts}\nТекущее время: {datetime.now().strftime('%Y-%m-%dT%H:%M:%S')}"
 
-    contents = []
+    messages = []
     for msg in chat["history"][-20:]:
-        role = "user" if msg["role"] == "user" else "model"
-        contents.append(types.Content(role=role, parts=[types.Part(text=msg["content"])]))
-    contents.append(types.Content(role="user", parts=[types.Part(text=f"{user}: {text}")]))
+        messages.append({"role": msg["role"], "content": msg["content"]})
+    messages.append({"role": "user", "content": f"{user}: {text}"})
 
     try:
-        response = client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=contents,
-            config=types.GenerateContentConfig(system_instruction=system),
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=300,
+            system=system,
+            messages=messages,
         )
-        reply = response.text.strip() if response.text else ""
+        reply = response.content[0].text.strip()
     except Exception as e:
-        print(f"Gemini error: {e}")
+        print(f"Claude error: {e}")
         return
 
     chat["history"].append({"role": "user", "content": f"{user}: {text}"})
-    chat["history"].append({"role": "model", "content": reply})
+    chat["history"].append({"role": "assistant", "content": reply})
 
     for fact in re.findall(r'\[ЗАПОМНИ:\s*(.+?)\]', reply):
         chat["facts"].append(fact.strip())
